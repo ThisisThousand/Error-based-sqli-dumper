@@ -27,6 +27,13 @@ This Python project demonstrates how an error-based SQL injection vulnerability 
 
 ---
 
+## Limitations
+- Only works on error-based SQL injection
+- Requires verbose database error messages
+- MySQL-specific behavior
+
+---
+
 ## Usage
 
 ```bash
