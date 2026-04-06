@@ -1,4 +1,4 @@
-# Error-Based SQL Injection Dumper
+# async-sqli-security-analyzer
 
 ## Description
 Automated error-based SQL injection tool for database enumeration and data extraction (educational use only).
