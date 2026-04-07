@@ -1,40 +1,104 @@
-# 🚀 High-Performance Async SQLi Engine (v3.0)
+🚀 Asynchronous SQL Injection Data Extraction Engine
 
-## Description
-Advanced data exfiltration engine designed for authorized security audits. This tool specializes in high-speed extraction via **Error-Based SQL Injection**, utilizing an asynchronous architecture to maximize throughput in controlled environments.
+📝 Description
+This project is an asynchronous SQL injection data extraction engine designed for controlled environments and authorized security testing.
 
-Unlike traditional sequential scripts, this engine leverages **Python's `asyncio` stack** to handle massive data volumes with minimal latency.
+It focuses on automating the process of:
 
----
+* Database schema enumeration
+* Table and column discovery
+* Structured data extraction
 
-## 🔥 Key Engineering Features
+The tool leverages Python’s asyncio ecosystem to improve efficiency over traditional sequential approaches.
 
-* **Producer-Consumer Architecture:** Uses an asynchronous **Worker-Queue** pattern to process database offsets independently, ensuring 100% resource utilization.
-* **Dual-Queue I/O Management:** Separate queues for network requests and disk writes (I/O) to prevent bottlenecks and ensure data integrity.
-* **Multi-Endpoint Rotation:** Support for multiple target URLs with automated rotation to bypass simple rate-limiting and distribute load.
-* **Pre-flight Vulnerability Check:** Automated verification of the injection vector and regex pattern matching before initiating full-scale exfiltration.
-* **WAF Evasion Logic:** Optimized payloads with 'AND balance' techniques (`AND '1'='1`) and `updatexml()` error triggers for better stability against basic security filters.
-* **Automated Schema Mapping:** Recursive discovery of databases, tables, and columns via `information_schema` without prior knowledge of the target structure.
-* **Safe SQL Reconstruction:** Real-time data sanitization and escaping to generate ready-to-import `.sql` files.
+⚙️ Core Features
 
+* Asynchronous Architecture
 
+  * Built with asyncio and httpx for concurrent request handling
+  * Uses semaphores to control concurrency and avoid overload
 
----
+* Batch-Based Extraction
 
-## ⚙️ Technical Specifications
+  * Processes multiple offsets in parallel to improve throughput
+  * Reduces idle time compared to sequential dumping
 
-| Feature | Implementation |
-| :--- | :--- |
-| **Concurrency** | `asyncio` + `Semaphore` |
-| **HTTP Client** | `httpx` (Asynchronous) |
-| **Payload Vector** | XPATH Error-Based (`updatexml`) |
-| **Data Flow** | Independent Workers + `asyncio.Queue` |
-| **Compatibility** | MySQL / MariaDB |
+* Schema Mapping
 
----
+  * Automatically enumerates:
 
-## 🛠️ Usage
+    * Databases
+    * Tables
+    * Columns
+  * Uses information_schema for discovery
 
-```bash
-# Basic usage with multiple endpoints and concurrency control
-python sqli_dumper.py -u "[http://target1.com/api,http://target2.com/api](http://target1.com/api,http://target2.com/api)" -i 77 -d target_db -c 15
+* Error-Based Extraction
+
+  * Implements MySQL error-based techniques (updatexml)
+  * Parses responses to extract query results
+
+* SQL Reconstruction
+
+  * Generates .sql output including:
+
+    * CREATE TABLE statements
+    * INSERT INTO data dumps
+  * Basic sanitization for safe output formatting
+
+* Multi-endpoint Support
+
+  * Rotates between multiple target endpoints to distribute load
+
+🛠️ Usage
+
+python sqli_dumper.py -u "http://target.com/api" -i 77 -d target_db
+
+Arguments:
+
+* -u → Target URL (comma-separated for multiple endpoints)
+* -i → Vulnerable numeric parameter
+* -d → Target database name
+
+🧪 Example Workflow
+
+1. Identify injectable parameter
+2. Map database structure
+3. Extract table data asynchronously
+4. Generate .sql dump for analysis
+
+⚠️ Limitations
+
+* Focused on error-based SQL injection (MySQL/MariaDB)
+* Does not include:
+
+  * Boolean-based or time-based techniques
+  * Advanced WAF bypass mechanisms
+* Results depend on:
+
+  * Error visibility
+  * Target behavior
+* Large datasets may require tuning of:
+
+  * Concurrency
+  * Batch size
+
+🧠 Technical Stack
+
+| Component     | Technology          |
+| ------------- | ------------------- |
+| Concurrency   | asyncio + Semaphore |
+| HTTP Client   | httpx (async)       |
+| Extraction    | Error-based SQLi    |
+| Data Handling | Python I/O          |
+
+⚖️ Legal & Ethical Notice
+
+This tool is intended strictly for educational purposes and authorized security testing.
+
+By using this software, you agree to:
+
+* Only test systems you own or have explicit permission to assess
+* Comply with all applicable laws and regulations
+* Take full responsibility for your actions
+
+Unauthorized use may be illegal.
